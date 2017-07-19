@@ -23,6 +23,12 @@
 #include <net/tcp.h>
 
 /* FIXME */
+enum {
+	CLIENT_WAITING,
+	CLIENT_READ,
+	CLIENT_WRITE,
+	CLIENT_CLOSING
+};
 struct server {
 	struct workqueue_struct	*dispatcher, *worker;
 	struct work_struct	work;
@@ -31,19 +37,21 @@ struct server {
 struct client {
 	struct work_struct	work;
 	struct socket		*sock;
+	unsigned char		ip[128];
+	int			port;
+	unsigned char		state;
+	unsigned char		inbuf[64 * 1024];
 };
 
 /* FIXME */
+static const char *state_text[] = {
+	"CLIENT_WAITING",
+	"CLIENT_READ",
+	"CLIENT_WRITE",
+	"CLIENT_CLOSING"
+};
 static unsigned short ktsdb_port = 55555;
-struct server sv;
-
-/* FIXME */
-static int ktsdb_send(struct socket *sock, unsigned char *buf, int len) {
-	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
-	struct kvec iov = { buf, len };
-
-	return kernel_sendmsg(sock, &msg, &iov, 1, len);
-}
+static struct server sv;
 
 /* FIXME */
 static int ktsdb_recv(struct socket *sock, unsigned char *buf, int len) {
@@ -54,8 +62,61 @@ static int ktsdb_recv(struct socket *sock, unsigned char *buf, int len) {
 }
 
 /* FIXME */
+static int ktsdb_send(struct socket *sock, unsigned char *buf, int len) {
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
+	struct kvec iov = { buf, len };
+
+	return kernel_sendmsg(sock, &msg, &iov, 1, len);
+}
+
+/* FIXME */
+static void set_state(struct client *c, unsigned char state) {
+	if (c->state != state) {
+		printk(KERN_INFO "Client '%s:%d' going from %s to %s\n", c->ip, c->port,
+			state_text[c->state], state_text[state]);
+		c->state = state;
+	}
+}
+
+/* FIXME */
+static void ktsdb_worker_machine(struct client *c) {
+	int stop = 0;
+
+repeat:
+	switch (c->state) {
+	case CLIENT_READ:
+		{
+			int len;
+
+			if ((len = ktsdb_recv(c->sock, c->inbuf, sizeof c->inbuf)) > 0)
+				set_state(c, CLIENT_WRITE);
+		}
+		break;
+	case CLIENT_WRITE:
+		{
+			ktsdb_send(c->sock, c->inbuf, strlen(c->inbuf));
+			set_state(c, CLIENT_WAITING);
+			stop = 1;
+		}
+		break;
+	case CLIENT_CLOSING:
+		break;
+	default:
+		break;
+	}
+	if (!stop)
+		goto repeat;
+}
+
+/* FIXME */
 static void ktsdb_wk_data_ready(struct sock *sk, int unused) {
+	struct client *c = (struct client *)sk->sk_user_data;
+
 	printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state);
+	if (sk->sk_state != TCP_CLOSE_WAIT) {
+		set_state(c, CLIENT_READ);
+		queue_work(sv.worker, &c->work);
+	}
 }
 
 /* FIXME */
@@ -70,6 +131,9 @@ static void ktsdb_wk_state_change(struct sock *sk) {
 
 /* FIXME */
 void ktsdb_conn_work(struct work_struct *work) {
+	struct client *c = container_of(work, struct client, work);
+
+	ktsdb_worker_machine(c);
 }
 
 /* FIXME */
@@ -98,13 +162,13 @@ static int ktsdb_accept_one(struct server *s) {
 		/* printk(KERN_ERR "[%s] error accepting client socket\n", __func__); */
 		goto end;
 	}
-	if ((ret = s->sock->ops->getname(sock, (struct sockaddr *)&sa, &len, 1)) < 0) {
+	if ((ret = sock->ops->getname(sock, (struct sockaddr *)&sa, &len, 1)) < 0) {
 		printk(KERN_ERR "[%s] error getting peer name\n", __func__);
 		sock->ops->shutdown(sock, SHUT_RDWR);
 		goto end;
 	}
 	printk(KERN_INFO "Accepted client '%pI4:%u'\n", &sa.sin_addr, ntohs(sa.sin_port));
-	if ((c = kmalloc(sizeof *c, GFP_KERNEL)) == NULL) {
+	if ((c = kzalloc(sizeof *c, GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "[%s] error allocating new client\n", __func__);
 		sock->ops->shutdown(sock, SHUT_RDWR);
 		goto end;
@@ -115,6 +179,8 @@ static int ktsdb_accept_one(struct server *s) {
 	c->sock->sk->sk_allocation = GFP_ATOMIC;
 	set_wk_callbacks(c->sock, c);
 	kernel_setsockopt(c->sock, SOL_TCP, TCP_NODELAY, (char *)&one, sizeof one);
+	snprintf(c->ip, sizeof c->ip, "%pI4", &sa.sin_addr);
+	c->port = ntohs(sa.sin_port);
 	return 0;
 
 end:
@@ -138,7 +204,7 @@ static void ktsdb_dp_write_space(struct sock *sk) {
 
 /* FIXME */
 static void ktsdb_dp_state_change(struct sock *sk) {
-	/* printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state); */
+	printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state);
 }
 
 /* FIXME */
