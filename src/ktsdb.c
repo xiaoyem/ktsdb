@@ -100,6 +100,12 @@ repeat:
 		}
 		break;
 	case CLIENT_CLOSING:
+		{
+			sock_release(c->sock);
+			printk(KERN_INFO "Client '%s:%d' got freed\n", c->ip, c->port);
+			kfree(c);
+			stop = 1;
+		}
 		break;
 	default:
 		break;
@@ -126,7 +132,18 @@ static void ktsdb_wk_write_space(struct sock *sk) {
 
 /* FIXME */
 static void ktsdb_wk_state_change(struct sock *sk) {
+	struct client *c = (struct client *)sk->sk_user_data;
+
 	printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state);
+	switch (sk->sk_state) {
+	case TCP_CLOSE:
+	case TCP_CLOSE_WAIT:
+		set_state(c, CLIENT_CLOSING);
+		queue_work(sv.worker, &c->work);
+		break;
+	default:
+		break;
+	}
 }
 
 /* FIXME */
@@ -148,8 +165,8 @@ static void set_wk_callbacks(struct socket *sock, struct client *c) {
 
 static int ktsdb_accept_one(struct server *s) {
 	struct socket *sock;
-	struct sockaddr_in sa;
 	int ret, len, one = 1;
+	struct sockaddr_in sa;
 	struct client *c;
 
 	if ((ret = sock_create_lite(PF_INET, SOCK_STREAM, IPPROTO_TCP, &sock)) < 0) {
