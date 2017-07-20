@@ -17,6 +17,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/workqueue.h>
 #include <net/sock.h>
@@ -33,12 +34,14 @@ struct server {
 	struct workqueue_struct	*dispatcher, *worker;
 	struct work_struct	work;
 	struct socket		*sock;
+	struct list_head	list;
 };
 struct client {
 	struct work_struct	work;
 	struct socket		*sock;
 	unsigned char		ip[128];
 	int			port;
+	struct list_head	list;
 	unsigned char		state;
 	unsigned char		inbuf[64 * 1024];
 };
@@ -70,7 +73,7 @@ static int ktsdb_send(struct socket *sock, unsigned char *buf, int len) {
 }
 
 /* FIXME */
-static void set_state(struct client *c, unsigned char state) {
+static inline void set_state(struct client *c, unsigned char state) {
 	if (c->state != state) {
 		printk(KERN_INFO "Client '%s:%d' going from %s to %s\n", c->ip, c->port,
 			state_text[c->state], state_text[state]);
@@ -102,6 +105,7 @@ repeat:
 	case CLIENT_CLOSING:
 		{
 			sock_release(c->sock);
+			list_del(&c->list);
 			printk(KERN_INFO "Client '%s:%d' got freed\n", c->ip, c->port);
 			kfree(c);
 			stop = 1;
@@ -118,7 +122,7 @@ repeat:
 static void ktsdb_wk_data_ready(struct sock *sk, int unused) {
 	struct client *c = (struct client *)sk->sk_user_data;
 
-	printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state);
+	/* printk(KERN_INFO "[%s] state = %d\n", __func__, sk->sk_state); */
 	if (sk->sk_state != TCP_CLOSE_WAIT) {
 		set_state(c, CLIENT_READ);
 		queue_work(sv.worker, &c->work);
@@ -198,6 +202,7 @@ static int ktsdb_accept_one(struct server *s) {
 	kernel_setsockopt(c->sock, SOL_TCP, TCP_NODELAY, (char *)&one, sizeof one);
 	snprintf(c->ip, sizeof c->ip, "%pI4", &sa.sin_addr);
 	c->port = ntohs(sa.sin_port);
+	list_add_tail(&c->list, &sv.list);
 	return 0;
 
 end:
@@ -281,6 +286,7 @@ static int __init ktsdb_init(void) {
 		printk(KERN_ERR "[%s] error listening server socket\n", __func__);
 		goto end;
 	}
+	INIT_LIST_HEAD(&sv.list);
 	printk(KERN_INFO "Server ktsdb started\n");
 	return 0;
 
@@ -293,6 +299,13 @@ end:
 
 /* FIXME */
 static void __exit ktsdb_exit(void) {
+	struct client *c, *n;
+
+	list_for_each_entry_safe(c, n, &sv.list, list) {
+		sock_release(c->sock);
+		list_del(&c->list);
+		kfree(c);
+	}
 	sock_release(sv.sock);
 	destroy_workqueue(sv.worker);
 	destroy_workqueue(sv.dispatcher);
