@@ -43,6 +43,7 @@ struct client {
 	int			port;
 	struct list_head	list;
 	unsigned char		state;
+	int			inpos;
 	unsigned char		inbuf[64 * 1024];
 };
 
@@ -89,15 +90,13 @@ repeat:
 	switch (c->state) {
 	case CLIENT_READ:
 		{
-			int len;
-
-			if ((len = ktsdb_recv(c->sock, c->inbuf, sizeof c->inbuf)) > 0)
+			if ((c->inpos = ktsdb_recv(c->sock, c->inbuf, sizeof c->inbuf)) > 0)
 				set_state(c, CLIENT_WRITE);
 		}
 		break;
 	case CLIENT_WRITE:
 		{
-			ktsdb_send(c->sock, c->inbuf, strlen(c->inbuf));
+			ktsdb_send(c->sock, c->inbuf, c->inpos);
 			set_state(c, CLIENT_WAITING);
 			stop = 1;
 		}
